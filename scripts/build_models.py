@@ -11,7 +11,7 @@ DB_FILE = BASE_DIR / "space_missions.db"
 MODEL_LAYERS = [
     "staging",
     # "intermediate",  # add future layers here in order
-    # "marts",
+    "marts",
 ]
 
 
