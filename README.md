@@ -20,8 +20,17 @@ be skipped).
 ├── docs/
 │   ├── challenge_overview.md     # original challenge README
 │   └── mission_challenge.md      # full challenge instructions
+├── models/
+│   ├── staging/
+│   │   └── stg_space_missions.sql      # cleans and types raw_space_missions
+│   └── marts/
+│       ├── mart_mission_performance.sql # outcomes & success metrics by destination
+│       └── mart_destination_risk.sql    # composite risk score & rank by destination
 ├── scripts/
-│   └── solve_challenge.sh        # runs the awk solver + verifies the result
+│   ├── solve_challenge.sh        # runs the awk solver + verifies the result
+│   ├── load_data.py              # parses the log and loads raw_space_missions into DuckDB
+│   └── build_models.py           # applies all SQL models to space_missions.db in layer order
+├── requirements.txt              # Python dependencies (duckdb)
 └── README.md
 ```
 ## Running the Solution
@@ -87,3 +96,74 @@ Step by step:
 ## Answer
 **`XRT-421-ZQP`** — Mission `WGU-0200`, launched `2065-06-05`, 1629-day
 Completed Mars mission.
+---
+## Analytics Engineering Pipeline
+Beyond the challenge solver, this repo contains a lightweight analytics
+engineering pipeline that ingests the full 100k-mission log into a local
+[DuckDB](https://duckdb.org/) database and exposes clean, queryable models.
+### Setup
+```bash
+# Create and activate the virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
+```
+### Loading the raw data
+```bash
+python scripts/load_data.py
+```
+Parses `data/space_missions.log`, skips comment/metadata lines, and bulk-loads
+100,000 records into the `raw_space_missions` table inside `space_missions.db`.
+### Building the models
+```bash
+python scripts/build_models.py
+```
+Applies all SQL models under `models/` in layer order (staging → marts),
+creating or replacing each table/view in `space_missions.db`.
+### Data layers
+#### Staging — `stg_space_missions` (view)
+A 1-to-1 cleaning layer over `raw_space_missions`. No business logic.
+| Transformation | Detail |
+|---|---|
+| Type casting | `date` VARCHAR → `mission_date` DATE |
+| Renamed columns | `date` → `mission_date`, `success_rate` → `success_rate_pct` |
+| String trimming | All VARCHAR columns trimmed |
+| `is_crewed` | `true` when `crew_size > 0` |
+| `is_duplicate_mission_id` | Flags the 25 `mission_id` values that appear more than once |
+#### Marts
+All mart tables exclude duplicate `mission_id` rows and use **settled missions
+only** (Completed, Partial Success, Failed, Aborted) as the denominator for
+rate calculations — Planned and In Progress missions have not yet concluded.
+**`mart_mission_performance`**
+Grain: one row per destination. Aggregates mission volume, outcome counts,
+completion/failure rates, crew profile, success score statistics, and the
+full date range of activity.
+Key columns: `total_missions`, `settled_missions`, `completed_missions`,
+`failed_missions`, `aborted_missions`, `completion_rate_pct`,
+`failure_rate_pct`, `avg_success_rate_pct`, `avg_duration_days`,
+`avg_crew_size`, `first_mission_date`, `last_mission_date`.
+**`mart_destination_risk`**
+Grain: one row per destination. Scores and ranks each destination using a
+composite risk score built from three min-max normalised components:
+| Component | Weight | Rationale |
+|---|---|---|
+| `failure_rate` | 50% | Share of settled missions that Failed or Aborted |
+| `avg_duration_days` | 30% | Longer missions carry more sustained exposure |
+| `avg_crew_size` | 20% | Larger crews mean more personnel at risk |
+The normalised components (`failure_rate_norm`, `duration_norm`,
+`crew_size_norm`) are exposed alongside the final `risk_score` and `risk_rank`
+for full auditability. `risk_rank = 1` is the highest-risk destination.
+### Querying with the DuckDB CLI
+```bash
+# Install (macOS)
+brew install duckdb
+
+# Open an interactive session
+duckdb space_missions.db
+
+# Example queries
+SELECT destination, risk_rank, risk_score FROM mart_destination_risk ORDER BY risk_rank;
+SELECT destination, completion_rate_pct, failure_rate_pct FROM mart_mission_performance ORDER BY failure_rate_pct DESC;
+```
